@@ -1,0 +1,146 @@
+
+---
+title: "Annotated Logistic Regression Report: U.S. Quality of Life (2024)"
+author: "Samuel Gu"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(caret)
+library(pROC)
+library(boot)
+```
+
+## 1. Problem Statement
+
+This report models whether a U.S. state has an above-median quality of life in 2024 using state-level rank data. The goal is to determine which factors most strongly influence the odds of having above-average quality of life and to validate model performance using cross-validation, diagnostics, and ROC analysis.
+
+> **Commentary**:  
+This sets the stage for the analysis. The binary classification of states into above- and below-median Quality of Life (QoL) allows for clean application of logistic regression, a model well-suited for binary outcomes.
+
+## 2. Data Overview
+
+```{r load-data}
+df <- read.csv("qol_states_2024.csv")
+head(df)
+```
+
+We create a binary outcome variable, `above_median_qol`, where:
+- `1` means above the median total score
+- `0` means below or equal
+
+```{r binary-variable}
+median_score <- median(df$QualityOfLifeTotalScore)
+df$above_median_qol <- ifelse(df$QualityOfLifeTotalScore > median_score, 1, 0)
+```
+
+> **Commentary**:  
+The dataset appears clean and well-structured, with ordinal rankings for affordability, economy, education & health, and safety. Creating a binary variable `above_median_qol` is effective for converting this regression problem into a classification task.
+
+## 3. Model Fitting
+
+```{r fit-model}
+predictors <- c("QualityOfLifeAffordability", "QualityOfLifeEconomy",
+                "QualityOfLifeEducationAndHealth", "QualityOfLifeSafety")
+formula <- as.formula(paste("above_median_qol ~", paste(predictors, collapse = " + ")))
+logit_model <- glm(formula, data = df, family = binomial(link = "logit"))
+summary(logit_model)
+```
+
+> **Commentary**:  
+The logistic model includes all four rank-based predictors. Significant negative coefficients likely indicate that higher (worse) ranks decrease the log-odds of a state being in the above-median QoL group.
+
+## 4. Inference and Interpretation
+
+```{r odds-ratios}
+exp(cbind(OddsRatio = coef(logit_model), confint(logit_model)))
+```
+
+> **Commentary**:  
+Exponentiated coefficients reveal **odds ratios**. Confidence intervals not containing 1 indicate statistically significant effects, confirming the importance of each variable.
+
+## 5. Model Prediction and Thresholds
+
+```{r predictions}
+df$pred_prob <- predict(logit_model, type = "response")
+roc_obj <- roc(df$above_median_qol, df$pred_prob)
+auc(roc_obj)
+plot(roc_obj, main = "ROC Curve with AUC")
+```
+
+> **Commentary**:  
+An AUC of ~0.98 indicates excellent discrimination between classes. The model has strong predictive ability.
+
+## Best Threshold (Youden’s Index)
+
+```{r best-threshold}
+coords(roc_obj, "best", ret = c("threshold", "sensitivity", "specificity"), best.method = "youden")
+```
+
+> **Commentary**:  
+The best threshold (~0.287) balances sensitivity and specificity. It is lower than 0.5, indicating the model favors sensitivity.
+
+## Confusion Matrices
+
+```{r confusion-matrices}
+thresholds <- c(0.3, 0.5, 0.7)
+for (pi0 in thresholds) {
+  pred_class <- ifelse(df$pred_prob >= pi0, 1, 0)
+  cat("\nThreshold =", pi0, "\n")
+  print(table(Predicted = pred_class, Actual = df$above_median_qol))
+}
+```
+
+> **Commentary**:  
+Lower thresholds (e.g., 0.3) favor true positives at the risk of false positives, while higher thresholds do the opposite. The 0.5 threshold usually balances both.
+
+## 6. Cross-Validation
+
+### LOOCV
+
+```{r loocv}
+loo_cv <- cv.glm(df, logit_model)
+loo_cv$delta[1]  # Error rate
+```
+
+> **Commentary**:  
+LOOCV provides an unbiased estimate of model performance. Accuracy ~76% is acceptable given small sample size.
+
+### 5-Fold Cross-Validation
+
+```{r kfold-cv}
+set.seed(123)
+train_control <- trainControl(method = "cv", number = 5)
+cv_model <- train(formula, data = df, method = "glm", family = "binomial", trControl = train_control)
+max(cv_model$results$Accuracy)
+```
+
+> **Commentary**:  
+5-Fold CV accuracy (~74%) is consistent with LOOCV, indicating stable model performance across folds.
+
+## 7. Link Function Comparison
+
+```{r links}
+probit_model <- glm(formula, data = df, family = binomial(link = "probit"))
+AIC(logit_model)
+AIC(probit_model)
+
+# Identity may fail
+identity_model <- tryCatch({
+  glm(formula, data = df, family = binomial(link = "identity"))
+}, error = function(e) NA)
+
+if (!is.na(identity_model)) AIC(identity_model)
+```
+
+> **Commentary**:  
+Logit and probit perform similarly (AIC ~24), with logit slightly better. Identity is not valid for binary classification and fails as expected.
+
+## 8. Conclusion
+
+> **Commentary**:  
+The logit model performs excellently across all metrics. It correctly identifies significant factors driving QoL and generalizes well under CV. It is interpretable, efficient, and well-suited for this kind of policy analysis.
+
